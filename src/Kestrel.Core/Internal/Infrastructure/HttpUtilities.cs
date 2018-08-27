@@ -29,6 +29,8 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Infrastructure
         private const ulong _http10VersionLong = 3471766442030158920; // GetAsciiStringAsLong("HTTP/1.0"); const results in better codegen
         private const ulong _http11VersionLong = 3543824036068086856; // GetAsciiStringAsLong("HTTP/1.1"); const results in better codegen
 
+        private static readonly Encoding HeaderValueEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true, throwOnInvalidBytes: true);
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static void SetKnownMethod(ulong mask, ulong knownMethodUlong, HttpMethod knownMethod, int length)
         {
@@ -83,6 +85,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Infrastructure
             }
         }
 
+        // Review: yea, I need to check if any of these calls are used for something other than header values and query strings and wether it's safe to allow UTF8
         public static unsafe string GetAsciiStringNonNullCharacters(this Span<byte> span)
         {
             if (span.IsEmpty)
@@ -90,19 +93,35 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Infrastructure
                 return string.Empty;
             }
 
-            var asciiString = new string('\0', span.Length);
+            var resultString = new string('\0', span.Length);
 
-            fixed (char* output = asciiString)
+            fixed (char* output = resultString)
             fixed (byte* buffer = &MemoryMarshal.GetReference(span))
             {
                 // This version if AsciiUtilities returns null if there are any null (0 byte) characters
                 // in the string
                 if (!StringUtilities.TryGetAsciiString(buffer, output, span.Length))
                 {
-                    throw new InvalidOperationException();
+                    // REVIEW: yea this isn't efficient
+                    for (int i = 0; i < span.Length; i++)
+                    {
+                        if (buffer[i] == 0)
+                        {
+                            throw new InvalidOperationException();
+                        }
+                    }
+
+                    try
+                    {
+                        resultString = HeaderValueEncoding.GetString(buffer, span.Length);
+                    }
+                    catch (DecoderFallbackException)
+                    {
+                        throw new InvalidOperationException();
+                    }
                 }
             }
-            return asciiString;
+            return resultString;
         }
 
         public static string GetAsciiStringEscaped(this Span<byte> span, int maxChars)
